@@ -453,6 +453,11 @@ static const struct {
 	{ "overlay", "SMS_OVERLAY" },
 	{ "save_dir", "SMS_SAVE_DIR" },
 	{ "disc_image", "SMS_DISC_IMAGE" },
+	// online co-op (platform/netplay)
+	{ "net_mode", "SMS_NET_MODE" },       // off, host or join
+	{ "net_address", "SMS_NET_ADDRESS" }, // the host, for join
+	{ "net_port", "SMS_NET_PORT" },       // UDP, 27016
+	{ "net_name", "SMS_NET_NAME" },       // shown to other players
 	{ "camera_invert_x", "SMS_CAMERA_INVERT_X" },
 	{ "camera_invert_y", "SMS_CAMERA_INVERT_Y" },
 	{ "camera_speed", "SMS_CAMERA_SPEED" },           // percent, 100 = the game's own

@@ -85,6 +85,7 @@ Options can be kept in [`settings.txt`](settings.txt) (`resolution = 2`, `textur
 | `--headless` (after the image) or `SMS_HEADLESS=1` | no window, for testing (Linux only) |
 | `SMS_OVERLAY=1` | open the debug overlay at start |
 | `SMS_GX_SCALE=n` | render at n times the GameCube's resolution |
+| `SMS_NET_MODE=host` | online co-op: host (`join` with `SMS_NET_ADDRESS`), on UDP `SMS_NET_PORT` (27016), as `SMS_NET_NAME`; see [docs/ONLINE_COOP.md](docs/ONLINE_COOP.md) |
 | `SMS_ANISO=n` | anisotropic filtering, 2 to 16 (up to what the GPU supports), for sharper textures at glancing angles |
 | `SMS_FULLSCREEN=1` | borderless fullscreen at the desktop's resolution; `exclusive` switches the display to `SMS_FULLSCREEN_MODE=WxH@Hz` (else the desktop's mode). F11 or Alt+Enter toggles fullscreen while playing |
 | `SMS_DISPLAY=n` | the monitor to open on (0 is the primary one; by default, the one under the mouse) |
@@ -169,6 +170,7 @@ docs/                 developer documentation and reference screenshots
 - [BUILD.md](BUILD.md): prerequisites for each system, the standalone build and macOS app, manual CMake builds, troubleshooting.
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): where a fix goes (decomp, patch or platform), how the build works, the platform layer, the decomp patches, every environment variable, developer tools, performance.
 - [docs/64-BIT.md](docs/64-BIT.md): how the 64-bit build works and what is left.
+- [docs/ONLINE_COOP.md](docs/ONLINE_COOP.md): online co-op, how its netcode and remote Marios work, and what comes next.
 - `platform/*/README.md`: each platform module in detail.
 
 The standalone build contains the whole game, so keep it to yourself: sharing it is sharing the game.

@@ -73,3 +73,11 @@ frame_rate = 60
 
 # save_dir = /path/to/memory/card/folder
 # disc_image = /path/to/GMSE01.iso
+
+# Online co-op (docs/ONLINE_COOP.md): one player hosts, up to seven join, and
+# everyone sees the others in the same level and episode. The host forwards
+# the UDP port on their router to play over the internet.
+# net_mode = off
+# net_address = 192.168.1.20
+# net_port = 27016
+# net_name = Mario
