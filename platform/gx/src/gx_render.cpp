@@ -795,6 +795,7 @@ void rendererInit(int efbScale) {
     s_copyUAlphaOne = glGetUniformLocation(s_copyProg, "u_alphaOne");
     glGenVertexArrays(1, &s_copyVao);
     postInit();
+    shaderInit();
     glcInvalidate();
     s_ready = true;
 }

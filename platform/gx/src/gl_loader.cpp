@@ -8,6 +8,8 @@ namespace gx { namespace gl {
 #define SMS_GX_DEFINE(type, name) type gx_##name = nullptr;
 SMS_GX_GL_FUNCS(SMS_GX_DEFINE)
 #undef SMS_GX_DEFINE
+PFNGLGETPROGRAMBINARYPROC gx_glGetProgramBinary = nullptr;
+PFNGLPROGRAMBINARYPROC gx_glProgramBinary = nullptr;
 #ifdef SMS_GLES
 PFNGLDRAWELEMENTSBASEVERTEXPROC gx_glDrawElementsBaseVertex = nullptr;
 #endif
@@ -80,6 +82,10 @@ bool load(void* (*getProc)(const char*)) {
         };
     }
 #endif
+    gx_glGetProgramBinary = reinterpret_cast<PFNGLGETPROGRAMBINARYPROC>(getProc("glGetProgramBinary"));
+    if (!gx_glGetProgramBinary) gx_glGetProgramBinary = reinterpret_cast<PFNGLGETPROGRAMBINARYPROC>(getProc("glGetProgramBinaryOES"));
+    gx_glProgramBinary = reinterpret_cast<PFNGLPROGRAMBINARYPROC>(getProc("glProgramBinary"));
+    if (!gx_glProgramBinary) gx_glProgramBinary = reinterpret_cast<PFNGLPROGRAMBINARYPROC>(getProc("glProgramBinaryOES"));
 #if !(defined(_WIN32) && !defined(_WIN64))
     if (getenv("SMS_GX_STATS")) {
 #define SMS_GX_WRAP(type, name)                                   \

@@ -45,6 +45,14 @@
 #endif
 
 typedef void (*PFNGLDRAWELEMENTSBASEVERTEXPROC)(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex);
+#ifndef GL_PROGRAM_BINARY_LENGTH
+#define GL_PROGRAM_BINARY_LENGTH 0x8741
+#endif
+#ifndef GL_NUM_PROGRAM_BINARY_FORMATS
+#define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
+#endif
+typedef void (*PFNGLGETPROGRAMBINARYPROC)(GLuint program, GLsizei bufSize, GLsizei *length, GLenum *binaryFormat, void *binary);
+typedef void (*PFNGLPROGRAMBINARYPROC)(GLuint program, GLenum binaryFormat, const void *binary, GLsizei length);
 
 inline void gx_glPointSize(GLfloat) {}
 inline void gx_glLogicOp(GLenum) {}
@@ -201,6 +209,8 @@ inline void gx_glBindFragDataLocation(GLuint, GLuint, const GLchar*) {}
 extern "C++" {
 namespace gx { namespace gl {
 SMS_GX_GL_FUNCS(SMS_GX_DECLARE)
+extern PFNGLGETPROGRAMBINARYPROC gx_glGetProgramBinary;
+extern PFNGLPROGRAMBINARYPROC gx_glProgramBinary;
 #ifdef SMS_GLES
 extern PFNGLDRAWELEMENTSBASEVERTEXPROC gx_glDrawElementsBaseVertex;
 inline void gx_glClearDepth(double depth) { if (gx_glClearDepthf) gx_glClearDepthf((GLfloat)depth); }
@@ -213,6 +223,8 @@ bool load(void* (*getProc)(const char*));
 
 #define SMS_GX_ALIAS(type, name) using gx::gl::gx_##name;
 SMS_GX_GL_FUNCS(SMS_GX_ALIAS)
+using gx::gl::gx_glGetProgramBinary;
+using gx::gl::gx_glProgramBinary;
 #ifdef SMS_GLES
 using gx::gl::gx_glDrawElementsBaseVertex;
 using gx::gl::gx_glClearDepth;
@@ -328,5 +340,7 @@ using gx::gl::gx_glDepthRange;
 #define glGenerateMipmap gx_glGenerateMipmap
 #define glCompressedTexImage2D gx_glCompressedTexImage2D
 #define glGetStringi gx_glGetStringi
+#define glGetProgramBinary gx_glGetProgramBinary
+#define glProgramBinary gx_glProgramBinary
 
 #endif

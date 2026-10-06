@@ -11,6 +11,7 @@
 #include <string.h>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace gx {
 
@@ -578,51 +579,39 @@ static std::unordered_map<ProgramKey, ShaderProgram, ProgramKeyHash> s_programs;
 static ProgramKey s_lastKey;
 static const ShaderProgram* s_lastProgram = nullptr;
 
-const ShaderProgram* shaderForCurrentState() {
+#pragma pack(push, 1)
+struct ShaderCacheFileHeader {
+    uint32_t magic;       // 0x534D5343 ('SMSC')
+    uint32_t version;     // 1
+};
+struct ShaderCacheEntryHeader {
     ProgramKey key;
-    ShaderKey& k = key.k;
-    buildKey(k);
-    key.indScale[0] = k.numInd ? g.bp[BP_RAS1_SS0] : 0;
-    key.indScale[1] = k.numInd ? g.bp[BP_RAS1_SS0 + 1] : 0;
-    // consecutive batches mostly share a program
-    if (s_lastProgram && key == s_lastKey) return s_lastProgram;
-    auto it = s_programs.find(key);
-    if (it != s_programs.end()) {
-        s_lastKey = key;
-        return s_lastProgram = &it->second;
-    }
+    uint32_t binaryFormat;
+    uint32_t binaryLength;
+};
+#pragma pack(pop)
 
-    g_statShaderCompiles++;
-    std::string vs = genVS(k), fs = genFS(k);
-    GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
-    GLuint p = glCreateProgram();
-    glAttachShader(p, v);
-    glAttachShader(p, f);
-    static const char* attrs[] = {"a_pos", "a_nrm", "a_bin", "a_tan", "a_clr0", "a_clr1", "a_tex0", "a_tex1", "a_tex2",
-                                  "a_tex3", "a_tex4", "a_tex5", "a_tex6", "a_tex7", "a_mtx"};
-    for (GLuint i = 0; i < 15; i++) glBindAttribLocation(p, i, attrs[i]);
-    glBindFragDataLocation(p, 0, "o_color");
-    glLinkProgram(p);
-    GLint ok = 0;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        glGetProgramInfoLog(p, sizeof log, nullptr, log);
-        logmsg("program link failed: %s", log);
+static bool isShaderCacheEnabled() {
+    static int s_enabled = -1;
+    if (s_enabled < 0) {
+        const char* e = getenv("SMS_SHADER_CACHE");
+        if (e) s_enabled = atoi(e) != 0;
+        else s_enabled = 1;
     }
-    glDeleteShader(v);
-    glDeleteShader(f);
-    ShaderProgram sp;
+    return s_enabled != 0;
+}
+
+static std::string getShaderCachePath() {
+    const char* saveDir = getenv("SMS_SAVE_DIR");
+    if (saveDir && *saveDir) {
+        return std::string(saveDir) + "/shader_cache.bin";
+    }
+    return "shader_cache.bin";
+}
+
+static void setupProgramUniforms(GLuint p, ShaderProgram& sp) {
     sp.prog = p;
     sp.uc.init = false;
-    sp.id = int(g_statShaderCompiles);
-    if (const char* dir = getenv("SMS_GX_DUMP_SHADERS")) {
-        char path[1024];
-        snprintf(path, sizeof path, "%s/prog%d.vs", dir, sp.id);
-        if (FILE* f = fopen(path, "w")) { fputs(vs.c_str(), f); fclose(f); }
-        snprintf(path, sizeof path, "%s/prog%d.fs", dir, sp.id);
-        if (FILE* f = fopen(path, "w")) { fputs(fs.c_str(), f); fclose(f); }
-    }
     glUseProgram(p);
     g_glc.prog = p;
     GLuint blk = glGetUniformBlockIndex(p, "XFBlock");
@@ -643,8 +632,175 @@ const ShaderProgram* shaderForCurrentState() {
     sp.uViewport = glGetUniformLocation(p, "u_vp");
     sp.uAmbMat = glGetUniformLocation(p, "u_chan");
     sp.uDstAlpha = -1;
+}
+
+static void saveProgramToCache(const ProgramKey& key, GLuint p) {
+    if (!isShaderCacheEnabled() || !glGetProgramBinary) return;
+    GLint len = 0;
+    glGetProgramiv(p, GL_PROGRAM_BINARY_LENGTH, &len);
+    if (len <= 0) return;
+
+    std::vector<uint8_t> bin(len);
+    GLsizei actualLen = 0;
+    GLenum format = 0;
+    glGetProgramBinary(p, len, &actualLen, &format, bin.data());
+    if (actualLen <= 0) return;
+
+    std::string path = getShaderCachePath();
+    FILE* f = fopen(path.c_str(), "ab+");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    if (ftell(f) == 0) {
+        ShaderCacheFileHeader hdr = { 0x534D5343, 1 };
+        fwrite(&hdr, sizeof(hdr), 1, f);
+    }
+    ShaderCacheEntryHeader eh;
+    eh.key = key;
+    eh.binaryFormat = format;
+    eh.binaryLength = (uint32_t)actualLen;
+    fwrite(&eh, sizeof(eh), 1, f);
+    fwrite(bin.data(), 1, actualLen, f);
+    fclose(f);
+}
+
+static ShaderProgram compileProgramFromSource(const ProgramKey& key) {
+    g_statShaderCompiles++;
+    const ShaderKey& k = key.k;
+    std::string vs = genVS(k), fs = genFS(k);
+    GLuint v = compile(GL_VERTEX_SHADER, vs), f = compile(GL_FRAGMENT_SHADER, fs);
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    static const char* attrs[] = {"a_pos", "a_nrm", "a_bin", "a_tan", "a_clr0", "a_clr1", "a_tex0", "a_tex1", "a_tex2",
+                                  "a_tex3", "a_tex4", "a_tex5", "a_tex6", "a_tex7", "a_mtx"};
+    for (GLuint i = 0; i < 15; i++) glBindAttribLocation(p, i, attrs[i]);
+    glBindFragDataLocation(p, 0, "o_color");
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[4096];
+        glGetProgramInfoLog(p, sizeof log, nullptr, log);
+        logmsg("program link failed: %s", log);
+    }
+    glDeleteShader(v);
+    glDeleteShader(f);
+    ShaderProgram sp;
+    setupProgramUniforms(p, sp);
+    sp.id = int(g_statShaderCompiles);
+    if (const char* dir = getenv("SMS_GX_DUMP_SHADERS")) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/prog%d.vs", dir, sp.id);
+        if (FILE* file = fopen(path, "w")) { fputs(vs.c_str(), file); fclose(file); }
+        snprintf(path, sizeof path, "%s/prog%d.fs", dir, sp.id);
+        if (FILE* file = fopen(path, "w")) { fputs(fs.c_str(), file); fclose(file); }
+    }
+    saveProgramToCache(key, p);
+    return sp;
+}
+
+const ShaderProgram* shaderForCurrentState() {
+    ProgramKey key;
+    ShaderKey& k = key.k;
+    buildKey(k);
+    key.indScale[0] = k.numInd ? g.bp[BP_RAS1_SS0] : 0;
+    key.indScale[1] = k.numInd ? g.bp[BP_RAS1_SS0 + 1] : 0;
+    // consecutive batches mostly share a program
+    if (s_lastProgram && key == s_lastKey) return s_lastProgram;
+    auto it = s_programs.find(key);
+    if (it != s_programs.end()) {
+        s_lastKey = key;
+        return s_lastProgram = &it->second;
+    }
+
+    ShaderProgram sp = compileProgramFromSource(key);
     s_lastKey = key;
     return s_lastProgram = &(s_programs[key] = sp);
+}
+
+static void prewarmCommonShaders() {
+    // Canonical 1: 1 texgen, 1 chan, 1 stage, modulate
+    ProgramKey pk1;
+    memset(&pk1, 0, sizeof(pk1));
+    pk1.k.numTexGens = 1; pk1.k.numChans = 1; pk1.k.numStages = 1;
+    pk1.k.colorEnv[0] = 0x0008F0; pk1.k.alphaEnv[0] = 0x0008F0;
+    if (s_programs.find(pk1) == s_programs.end()) s_programs[pk1] = compileProgramFromSource(pk1);
+
+    // Canonical 2: 1 texgen, 1 chan, 1 stage, replace
+    ProgramKey pk2;
+    memset(&pk2, 0, sizeof(pk2));
+    pk2.k.numTexGens = 1; pk2.k.numChans = 1; pk2.k.numStages = 1;
+    pk2.k.colorEnv[0] = 0x000FC0; pk2.k.alphaEnv[0] = 0x000FC0;
+    if (s_programs.find(pk2) == s_programs.end()) s_programs[pk2] = compileProgramFromSource(pk2);
+
+    // Canonical 3: 0 texgen (color only), 1 chan, 1 stage
+    ProgramKey pk3;
+    memset(&pk3, 0, sizeof(pk3));
+    pk3.k.numTexGens = 0; pk3.k.numChans = 1; pk3.k.numStages = 1;
+    pk3.k.colorEnv[0] = 0x000FF0; pk3.k.alphaEnv[0] = 0x000FF0;
+    if (s_programs.find(pk3) == s_programs.end()) s_programs[pk3] = compileProgramFromSource(pk3);
+
+    // Canonical 4: 1 texgen, 1 chan, 2 stages (alpha test + lighting)
+    ProgramKey pk4;
+    memset(&pk4, 0, sizeof(pk4));
+    pk4.k.numTexGens = 1; pk4.k.numChans = 1; pk4.k.numStages = 2;
+    pk4.k.colorEnv[0] = 0x0008F0; pk4.k.alphaEnv[0] = 0x0008F0;
+    pk4.k.colorEnv[1] = 0x0008F0; pk4.k.alphaEnv[1] = 0x0008F0;
+    if (s_programs.find(pk4) == s_programs.end()) s_programs[pk4] = compileProgramFromSource(pk4);
+
+    // Canonical 5: 2 texgens, 1 chan, 2 stages
+    ProgramKey pk5;
+    memset(&pk5, 0, sizeof(pk5));
+    pk5.k.numTexGens = 2; pk5.k.numChans = 1; pk5.k.numStages = 2;
+    pk5.k.colorEnv[0] = 0x0008F0; pk5.k.alphaEnv[0] = 0x0008F0;
+    pk5.k.colorEnv[1] = 0x0008F0; pk5.k.alphaEnv[1] = 0x0008F0;
+    if (s_programs.find(pk5) == s_programs.end()) s_programs[pk5] = compileProgramFromSource(pk5);
+}
+
+void shaderInit() {
+    if (!isShaderCacheEnabled()) return;
+
+    if (glProgramBinary) {
+        GLint numFormats = 0;
+        glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &numFormats);
+        if (numFormats > 0) {
+            std::string path = getShaderCachePath();
+            FILE* f = fopen(path.c_str(), "rb");
+            if (f) {
+                ShaderCacheFileHeader hdr;
+                if (fread(&hdr, sizeof(hdr), 1, f) == 1 && hdr.magic == 0x534D5343 && hdr.version == 1) {
+                    size_t loaded = 0;
+                    ShaderCacheEntryHeader eh;
+                    while (fread(&eh, sizeof(eh), 1, f) == 1) {
+                        if (eh.binaryLength == 0 || eh.binaryLength > (16u << 20)) break;
+                        std::vector<uint8_t> bin(eh.binaryLength);
+                        if (fread(bin.data(), 1, eh.binaryLength, f) != eh.binaryLength) break;
+
+                        GLuint p = glCreateProgram();
+                        glProgramBinary(p, eh.binaryFormat, bin.data(), eh.binaryLength);
+                        GLint ok = 0;
+                        glGetProgramiv(p, GL_LINK_STATUS, &ok);
+                        if (ok) {
+                            ShaderProgram sp;
+                            setupProgramUniforms(p, sp);
+                            sp.id = (int)s_programs.size();
+                            s_programs[eh.key] = sp;
+                            loaded++;
+                        } else {
+                            glDeleteProgram(p);
+                        }
+                    }
+                    if (loaded > 0) {
+                        logmsg("shader: successfully pre-loaded %zu programs from cache (%s)", loaded, path.c_str());
+                    }
+                }
+                fclose(f);
+            }
+        }
+    }
+
+    prewarmCommonShaders();
+    logmsg("shader: initialized cache and pre-warmed %zu active shaders", s_programs.size());
 }
 
 void shaderShutdown() {

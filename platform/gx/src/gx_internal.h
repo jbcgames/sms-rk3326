@@ -206,6 +206,8 @@ struct ShaderProgram {
     mutable UniformCache uc;
 };
 const ShaderProgram* shaderForCurrentState();
+void shaderInit();
+void shaderShutdown();
 
 // ---------------------------------------------------------------- util
 uint64_t hashBytes(const void* data, size_t n, uint64_t seed = 0);
