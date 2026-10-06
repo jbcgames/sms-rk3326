@@ -1245,6 +1245,8 @@ static bool asyncReads() {
     return on != 0;
 }
 
+static bool fastPeekEnabled();
+
 // Pixel metrics (GXClearPixMetric/GXReadPixMetric). Delfino's pollution
 // counters draw each goop layer with an alpha test and read how many pixels
 // reached the colour unit; the game subtracts 4 per polygon of what it drew,
@@ -1283,6 +1285,13 @@ static void pixReleasePending() {
     s_pixPending.clear();
 }
 static uint64_t queryResult(GLuint q) {
+    if (fastPeekEnabled()) {
+        GLuint avail = 0;
+        glGetQueryObjectuiv(q, GL_QUERY_RESULT_AVAILABLE, &avail);
+        if (!avail) {
+            return uint64_t(s_pixTris) * 50;
+        }
+    }
     GxTimer tw(&s_waitSeconds);
     GLuint n = 0;
     glGetQueryObjectuiv(q, GL_QUERY_RESULT, &n);
