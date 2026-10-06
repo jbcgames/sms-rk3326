@@ -133,9 +133,20 @@ bool openWindow(int scale) {
         logmsg("SDL_Init failed: %s", SDL_GetError());
         return false;
     }
+    if (access("gamecontrollerdb.txt", R_OK) == 0) SDL_GameControllerAddMappingsFromFile("gamecontrollerdb.txt");
+    if (const char* pdb = getenv("SDL_GAMECONTROLLERCONFIG_FILE")) SDL_GameControllerAddMappingsFromFile(pdb);
+#ifdef SMS_GLES
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    if (SDL_GL_LoadLibrary("libGLESv2.so.2") != 0 && SDL_GL_LoadLibrary("libGLESv2.so") != 0) {
+        logmsg("SDL_GL_LoadLibrary(libGLESv2) warning: %s", SDL_GetError());
+    }
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     // Open on the monitor containing the pointer (usually the launcher's Play
     // button). Fall back to the primary display if global coordinates are unavailable.
@@ -164,9 +175,13 @@ bool openWindow(int scale) {
     }
     const WindowArea layout = initialWindowLayout({desktop.x, desktop.y, desktop.w, desktop.h},
                                                   640.0 * GXPC_GetWidescreen() / 480.0, windowScale);
-    s_window = SDL_CreateWindow("Super Mario Sunshine", layout.x, layout.y, layout.w, layout.h,
-                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
-                                SDL_WINDOW_HIDDEN);
+    Uint32 winFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+#if !defined(__aarch64__) && !defined(__arm__)
+    winFlags |= SDL_WINDOW_HIDDEN;
+#else
+    winFlags |= SDL_WINDOW_SHOWN;
+#endif
+    s_window = SDL_CreateWindow("Super Mario Sunshine", layout.x, layout.y, layout.w, layout.h, winFlags);
     if (!s_window) {
         logmsg("SDL_CreateWindow failed: %s", SDL_GetError());
         SDL_Quit();
@@ -176,7 +191,7 @@ bool openWindow(int scale) {
     applyIcon();
     s_glctx = SDL_GL_CreateContext(s_window);
     if (!s_glctx) {
-        logmsg("OpenGL 3.3 core context failed: %s", SDL_GetError());
+        logmsg("OpenGL context creation failed: %s", SDL_GetError());
         SDL_DestroyWindow(s_window);
         s_window = nullptr;
         SDL_Quit();
@@ -209,8 +224,13 @@ bool openWindow(int scale) {
     // fullscreen uses the same monitor.
     const char* modeEnv = getenv("SMS_WINDOW_MODE");
     WindowMode mode = parseWindowMode(modeEnv);
-    if (!(modeEnv && *modeEnv) && envTrue("SMS_FULLSCREEN"))
-        mode = WM_BORDERLESS;
+    if (!(modeEnv && *modeEnv)) {
+#if defined(__aarch64__) || defined(__arm__)
+        mode = WM_FULLSCREEN;
+#else
+        if (envTrue("SMS_FULLSCREEN")) mode = WM_BORDERLESS;
+#endif
+    }
     if (mode != WM_WINDOWED) {
         s_fullscreenKind = mode;
         setFullscreen(true);
@@ -225,6 +245,14 @@ bool openWindow(int scale) {
         logmsg("mouse look on (F10 releases the mouse)");
         captureMouse((SDL_GetWindowFlags(s_window) & SDL_WINDOW_INPUT_FOCUS) != 0);
     }
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (SDL_IsGameController(i)) {
+            if (SDL_GameController* c = SDL_GameControllerOpen(i)) {
+                s_pads.push_back(c);
+                logmsg("Opened Game Controller %d: %s", i, SDL_GameControllerName(c));
+            }
+        }
+    }
     return true;
 }
 #endif
@@ -235,6 +263,15 @@ void* eglGetProc(const char* name) { return reinterpret_cast<void*>(eglGetProcAd
 bool tryEglDisplay(EGLDisplay dpy) {
     EGLint major, minor;
     if (dpy == EGL_NO_DISPLAY || !eglInitialize(dpy, &major, &minor)) return false;
+#ifdef SMS_GLES
+    if (!eglBindAPI(EGL_OPENGL_ES_API)) return false;
+    const EGLint cfgAttr[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_NONE};
+    EGLConfig cfg;
+    EGLint n = 0;
+    if (!eglChooseConfig(dpy, cfgAttr, &cfg, 1, &n) || n < 1) return false;
+    const EGLint ctxAttr[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttr);
+#else
     if (!eglBindAPI(EGL_OPENGL_API)) return false;
     const EGLint cfgAttr[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
     EGLConfig cfg;
@@ -243,6 +280,7 @@ bool tryEglDisplay(EGLDisplay dpy) {
     const EGLint ctxAttr[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3,
                               EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE};
     EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttr);
+#endif
     if (ctx == EGL_NO_CONTEXT) return false;
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) return true;
     // no surfaceless support: fall back to a tiny pbuffer
@@ -348,17 +386,26 @@ uint32_t GXPC_FrameCount(void) { return s_frame; }
 
 int GXPC_InitAuto(int efbScale) {
     if (rendererReady()) return 1;
-    if (const char* e = getenv("SMS_GX_SCALE")) efbScale = atoi(e) > 0 ? atoi(e) : efbScale;
+    if (const char* e = getenv("SMS_RENDER_SCALE")) {
+        float f = (float)atof(e);
+        if (f >= 0.2f && f <= 8.0f) efbScale = int(f >= 1.0f ? f : 1.0f);
+    } else if (const char* e = getenv("SMS_GX_SCALE")) {
+        float f = (float)atof(e);
+        if (f >= 0.2f && f <= 8.0f) efbScale = int(f >= 1.0f ? f : 1.0f);
+    }
     if (envTrue("SMS_VSYNC")) s_vsync = strcmp(getenv("SMS_VSYNC"), "adaptive") == 0 ? -1 : 1;
     bool headless;
     if (s_forceHeadless >= 0) headless = s_forceHeadless != 0;
     else if (envTrue("SMS_HEADLESS")) headless = true;
     else {
+#if defined(_WIN32) || defined(__APPLE__) || defined(__arm__) || defined(__aarch64__)
+        headless = false;
+#else
         const char* d = getenv("DISPLAY");
         const char* w = getenv("WAYLAND_DISPLAY");
-        headless = !(d && *d) && !(w && *w);
-#if defined(_WIN32) || defined(__APPLE__)
-        headless = false;
+        const char* v = getenv("SDL_VIDEODRIVER");
+        bool direct = v && (!strcmp(v, "kmsdrm") || !strcmp(v, "mali") || !strcmp(v, "directfb"));
+        headless = !direct && !(d && *d) && !(w && *w);
 #endif
     }
     g_displayCopyHook = onDisplayCopy;
@@ -420,7 +467,19 @@ void sms_gx_pump_events(void) {
         switch (ev.type) {
         case SDL_CONTROLLERDEVICEADDED:
             if (SDL_IsGameController(ev.cdevice.which)) {
-                if (SDL_GameController* c = SDL_GameControllerOpen(ev.cdevice.which)) s_pads.push_back(c);
+                bool found = false;
+                for (SDL_GameController* c : s_pads) {
+                    if (SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(c)) == ev.cdevice.which) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    if (SDL_GameController* c = SDL_GameControllerOpen(ev.cdevice.which)) {
+                        s_pads.push_back(c);
+                        logmsg("Hotplugged Game Controller: %s", SDL_GameControllerName(c));
+                    }
+                }
             }
             break;
         case SDL_CONTROLLERDEVICEREMOVED:

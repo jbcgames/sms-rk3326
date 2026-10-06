@@ -2475,9 +2475,15 @@ extern "C" int GXPC_RunLauncher(const char* settingsPath, const char* bindingsPa
         fprintf(stderr, "[launcher] SDL_Init failed: %s; starting the game\n", SDL_GetError());
         return 1;
     }
+#ifdef SMS_GLES
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_Rect usable = {0, 0, 1280, 800};
     SDL_GetDisplayUsableBounds(0, &usable);
@@ -2538,7 +2544,11 @@ extern "C" int GXPC_RunLauncher(const char* settingsPath, const char* bindingsPa
     ImGui::GetStyle().FontSizeBase = 18.0f;
 
     ImGui_ImplSDL2_InitForOpenGL(win, ctx);
+#ifdef SMS_GLES
+    ImGui_ImplOpenGL3_Init("#version 300 es");
+#else
     ImGui_ImplOpenGL3_Init("#version 330 core");
+#endif
 
     L.scanDisplays();
     L.scanMods();

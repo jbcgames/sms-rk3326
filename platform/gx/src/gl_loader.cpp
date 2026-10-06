@@ -8,6 +8,9 @@ namespace gx { namespace gl {
 #define SMS_GX_DEFINE(type, name) type gx_##name = nullptr;
 SMS_GX_GL_FUNCS(SMS_GX_DEFINE)
 #undef SMS_GX_DEFINE
+#ifdef SMS_GLES
+PFNGLDRAWELEMENTSBASEVERTEXPROC gx_glDrawElementsBaseVertex = nullptr;
+#endif
 
 // SMS_GX_STATS counts the GL calls the renderer makes: each entry point is
 // wrapped in a trampoline that bumps g_statGlCalls (not on 32-bit Windows,
@@ -62,6 +65,21 @@ bool load(void* (*getProc)(const char*)) {
     if (!gx_##name) { gx::logmsg("GL entry point missing: %s", #name); ok = false; }
     SMS_GX_GL_FUNCS(SMS_GX_LOAD)
 #undef SMS_GX_LOAD
+#ifdef SMS_GLES
+    gx_glDrawElementsBaseVertex = reinterpret_cast<PFNGLDRAWELEMENTSBASEVERTEXPROC>(getProc("glDrawElementsBaseVertex"));
+    if (!gx_glDrawElementsBaseVertex) {
+        gx_glDrawElementsBaseVertex = reinterpret_cast<PFNGLDRAWELEMENTSBASEVERTEXPROC>(getProc("glDrawElementsBaseVertexOES"));
+    }
+    if (!gx_glDrawElementsBaseVertex) {
+        gx_glDrawElementsBaseVertex = reinterpret_cast<PFNGLDRAWELEMENTSBASEVERTEXPROC>(getProc("glDrawElementsBaseVertexEXT"));
+    }
+    if (!gx_glDrawElementsBaseVertex) {
+        gx::logmsg("sms_gx: glDrawElementsBaseVertex not available, using fallback wrapper");
+        gx_glDrawElementsBaseVertex = [](GLenum mode, GLsizei count, GLenum type, const void* indices, GLint basevertex) {
+            glDrawElements(mode, count, type, indices);
+        };
+    }
+#endif
 #if !(defined(_WIN32) && !defined(_WIN64))
     if (getenv("SMS_GX_STATS")) {
 #define SMS_GX_WRAP(type, name)                                   \

@@ -442,6 +442,12 @@ static const struct {
 	{ "frame_rate", "SMS_FRAME_RATE" },         // 30 or 60
 	{ "mod", "SMS_MOD" },
 	{ "resolution", "SMS_GX_SCALE" },
+	{ "render_scale", "SMS_RENDER_SCALE" },
+	{ "draw_distance", "SMS_DRAW_DISTANCE" },
+	{ "far_plane", "SMS_FAR_PLANE" },
+	{ "fast_peek", "SMS_FAST_PEEK" },
+	{ "copy_writeback", "SMS_GX_COPY_WRITEBACK" },
+	{ "disable_shimmer", "SMS_DISABLE_SHIMMER" },
 	{ "window_scale", "SMS_WINDOW_SCALE" },
 	{ "vsync", "SMS_VSYNC" },
 	{ "skip_movies", "SMS_SKIP_MOVIES" },
@@ -707,6 +713,18 @@ extern "C" void port_init(int argc, char** argv)
 		port_frame_rate = atoi(r) == 60 ? 60 : 30;
 	if (port_frame_rate == 60)
 		port_log("[port] frame rate: 60 during gameplay\n");
+	if (const char* s = getenv("SMS_RENDER_SCALE"))
+		port_log("[port] render scale: %s\n", s);
+	if (const char* d = getenv("SMS_DRAW_DISTANCE"))
+		port_log("[port] draw distance: %s\n", d);
+	if (const char* f = getenv("SMS_FAR_PLANE"))
+		port_log("[port] far plane: %s\n", f);
+	if (const char* fp = getenv("SMS_FAST_PEEK"))
+		port_log("[port] fast peek: %s\n", fp);
+	if (const char* wb = getenv("SMS_GX_COPY_WRITEBACK"))
+		port_log("[port] copy writeback: %s\n", wb);
+	if (const char* sh = getenv("SMS_DISABLE_SHIMMER"))
+		port_log("[port] disable shimmer: %s\n", sh);
 	sms_mod_activate();
 	for (int i = 1; i < argc; i++)
 		if (strcmp(argv[i], "--headless") == 0) {

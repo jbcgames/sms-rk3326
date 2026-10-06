@@ -61,6 +61,37 @@ static void buildKey(ShaderKey& k) {
 }
 
 // ------------------------------------------------------------------ vertex shader
+#ifdef SMS_GLES
+static const char* kVsHeader = R"(#version 300 es
+precision highp float;
+precision highp int;
+layout(std140) uniform XFBlock { uvec4 xf[184]; };
+uniform vec4 u_proj[2];
+uniform vec4 u_vp[2];
+uniform vec2 u_efb;
+uniform vec4 u_chan[4];
+in vec3 a_pos; in vec3 a_nrm; in vec3 a_bin; in vec3 a_tan;
+in vec4 a_clr0; in vec4 a_clr1;
+in vec2 a_tex0; in vec2 a_tex1; in vec2 a_tex2; in vec2 a_tex3;
+in vec2 a_tex4; in vec2 a_tex5; in vec2 a_tex6; in vec2 a_tex7;
+in uvec3 a_mtx;
+out vec4 v_c0; out vec4 v_c1;
+out vec3 v_tc0; out vec3 v_tc1; out vec3 v_tc2; out vec3 v_tc3;
+out vec3 v_tc4; out vec3 v_tc5; out vec3 v_tc6; out vec3 v_tc7;
+out float v_depth;
+float X(int i) { return uintBitsToFloat(xf[i >> 2][i & 3]); }
+vec4 R4(int w) { return vec4(X(w), X(w + 1), X(w + 2), X(w + 3)); }
+vec3 R3(int w) { return vec3(X(w), X(w + 1), X(w + 2)); }
+vec4 C(int w) { uint u = xf[w >> 2][w & 3];
+  return vec4(float((u >> 24) & 255u), float((u >> 16) & 255u), float((u >> 8) & 255u), float(u & 255u)) / 255.0; }
+// light block: word 608 + 16 * light
+vec4 lightColor(int l) { return C(608 + l * 16 + 3); }
+vec3 lightA(int l) { return R3(608 + l * 16 + 4); }
+vec3 lightK(int l) { return R3(608 + l * 16 + 7); }
+vec3 lightPos(int l) { return R3(608 + l * 16 + 10); }
+vec3 lightDir(int l) { return R3(608 + l * 16 + 13); }
+)";
+#else
 static const char* kVsHeader = R"(#version 330 core
 layout(std140) uniform XFBlock { uvec4 xf[184]; };
 uniform vec4 u_proj[2];
@@ -88,6 +119,7 @@ vec3 lightK(int l) { return R3(608 + l * 16 + 7); }
 vec3 lightPos(int l) { return R3(608 + l * 16 + 10); }
 vec3 lightDir(int l) { return R3(608 + l * 16 + 13); }
 )";
+#endif
 
 // Attenuation divides by k0 + k1*d + k2*d^2.  A light loaded with all-zero
 // coefficients (J3D leaves unused lights like that) must contribute nothing
@@ -147,8 +179,10 @@ static std::string genVS(const ShaderKey& k) {
          "  gl_Position.z = zw * (2.0 / 16777215.0) - clip.w;\n"
          "  gl_Position.w = clip.w;\n"
          "  v_depth = zw / (16777215.0 * clip.w);\n";
+#ifndef SMS_GLES
     if (k.clip) s += "  gl_ClipDistance[0] = clip.z + clip.w;\n  gl_ClipDistance[1] = -clip.z;\n";
     else s += "  gl_ClipDistance[0] = 1.0;\n  gl_ClipDistance[1] = 1.0;\n";
+#endif
 
     // lighting: channels 0/1, colour and alpha controlled separately
     const char* vtx[2] = {"a_clr0", "a_clr1"};
@@ -239,6 +273,31 @@ static std::string genVS(const ShaderKey& k) {
 }
 
 // ------------------------------------------------------------------ fragment shader
+#ifdef SMS_GLES
+static const char* kFsHeader = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+in vec4 v_c0; in vec4 v_c1;
+in vec3 v_tc0; in vec3 v_tc1; in vec3 v_tc2; in vec3 v_tc3;
+in vec3 v_tc4; in vec3 v_tc5; in vec3 v_tc6; in vec3 v_tc7;
+in float v_depth;
+uniform sampler2D u_tex[8];
+uniform ivec4 u_tevreg[4];
+uniform ivec4 u_konst[4];
+uniform vec2 u_texscale[8];
+uniform vec2 u_texsize[8];
+uniform ivec2 u_alpharef;
+uniform vec4 u_fog;
+uniform vec4 u_fogcolor;
+uniform vec4 u_indmtx[6];
+layout(location = 0) out vec4 o_color;
+ivec4 texi(vec4 c) { return ivec4(round(clamp(c, 0.0, 1.0) * 255.0)); }
+vec2 proj(vec3 t) { return t.xy / (t.z == 0.0 ? 1.0 : t.z); }
+ivec3 lerp3(ivec3 a, ivec3 b, ivec3 c) { ivec3 c2 = c + (c >> 7); return (a * (256 - c2) + b * c2 + 128) >> 8; }
+int lerp1(int a, int b, int c) { int c2 = c + (c >> 7); return (a * (256 - c2) + b * c2 + 128) >> 8; }
+)";
+#else
 static const char* kFsHeader = R"(#version 330 core
 in vec4 v_c0; in vec4 v_c1;
 in vec3 v_tc0; in vec3 v_tc1; in vec3 v_tc2; in vec3 v_tc3;
@@ -259,6 +318,7 @@ vec2 proj(vec3 t) { return t.xy / (t.z == 0.0 ? 1.0 : t.z); }
 ivec3 lerp3(ivec3 a, ivec3 b, ivec3 c) { ivec3 c2 = c + (c >> 7); return (a * (256 - c2) + b * c2 + 128) >> 8; }
 int lerp1(int a, int b, int c) { int c2 = c + (c >> 7); return (a * (256 - c2) + b * c2 + 128) >> 8; }
 )";
+#endif
 
 static const char* kColorArg[16] = {"cprev.rgb", "cprev.aaa", "creg0.rgb", "creg0.aaa", "creg1.rgb", "creg1.aaa",
                                     "creg2.rgb", "creg2.aaa", "tex.rgb",   "tex.aaa",   "ras.rgb",   "ras.aaa",

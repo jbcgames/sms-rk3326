@@ -59,7 +59,7 @@ struct GxTimer {
 
 enum { EFB_W = 640, EFB_H = 528 };
 
-static int s_scale = 1;
+static float s_scale = 1.0f;
 
 // Widescreen (GXPC_SetWidescreen): the EFB is s_efbW = 640 * s_wide wide
 // while the game keeps working in 640-wide coordinates, which each draw,
@@ -302,6 +302,71 @@ static GLuint compileProgram(const char* vs, const char* fs) {
 
 // EFB -> texture conversion.  The output is what sampling the GX texture of
 // the copy's format would return, so later draws can use it directly.
+#ifdef SMS_GLES
+static const char* kCopyVs = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform vec4 u_rect; // x, y, w, h in EFB texture coordinates (0..1)
+out vec2 v_uv;
+void main() {
+  vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+  v_uv = u_rect.xy + p * u_rect.zw;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+static const char* kCopyFs = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D u_color;
+uniform sampler2D u_depth;
+uniform int u_mode;     // bit 5: depth copy, bit 4: intensity (YUV) conversion, bits 0-3: format
+uniform int u_alphaOne; // EFB pixel format has no alpha
+in vec2 v_uv;
+layout(location = 0) out vec4 o_color;
+float q(float v, float bits) { float m = exp2(bits) - 1.0; return floor(v * m + 0.5) / m; }
+void main() {
+  int f = u_mode & 15;
+  if ((u_mode & 32) != 0) {
+    uint z = uint(clamp(texture(u_depth, v_uv).r, 0.0, 1.0) * 16777215.0);
+    float hi = float((z >> 16) & 255u) / 255.0, mid = float((z >> 8) & 255u) / 255.0, lo = float(z & 255u) / 255.0;
+    if (f == 1) o_color = vec4(hi);                        // Z8
+    else if (f == 11 || f == 3) o_color = vec4(mid, mid, mid, hi); // Z16 (IA8 layout)
+    else if (f == 6) o_color = vec4(hi, mid, lo, 1.0);     // Z24X8
+    else if (f == 0) o_color = vec4(q(hi, 4.0));           // Z4
+    else if (f == 9) o_color = vec4(mid);                  // Z8M
+    else if (f == 10) o_color = vec4(lo);                  // Z8L
+    else if (f == 12) o_color = vec4(lo, lo, lo, mid);     // Z16L
+    else o_color = vec4(hi);
+    return;
+  }
+  vec4 c = texture(u_color, v_uv);
+  if (u_alphaOne != 0) c.a = 1.0;
+  if ((u_mode & 16) != 0) {
+    float y = clamp(0.257 * c.r + 0.504 * c.g + 0.098 * c.b + 16.0 / 255.0, 0.0, 1.0);
+    if (f == 0) o_color = vec4(q(y, 4.0));
+    else if (f == 1) o_color = vec4(y);
+    else if (f == 2) o_color = vec4(vec3(q(y, 4.0)), q(c.a, 4.0));
+    else if (f == 3) o_color = vec4(vec3(y), c.a);
+    else o_color = c;
+    return;
+  }
+  if (f == 0) o_color = vec4(q(c.r, 4.0));                                // R4
+  else if (f == 2) o_color = vec4(vec3(q(c.r, 4.0)), q(c.a, 4.0));        // RA4
+  else if (f == 3) o_color = vec4(c.rrr, c.a);                            // RA8
+  else if (f == 4) o_color = vec4(q(c.r, 5.0), q(c.g, 6.0), q(c.b, 5.0), 1.0); // RGB565
+  else if (f == 5) o_color = c.a > 0.99 ? vec4(q(c.r, 5.0), q(c.g, 5.0), q(c.b, 5.0), 1.0)
+                                        : vec4(q(c.r, 4.0), q(c.g, 4.0), q(c.b, 4.0), q(c.a, 3.0)); // RGB5A3
+  else if (f == 7) o_color = vec4(c.a);                                   // A8
+  else if (f == 8) o_color = vec4(c.r);                                   // R8
+  else if (f == 9) o_color = vec4(c.g);                                   // G8
+  else if (f == 10) o_color = vec4(c.b);                                  // B8
+  else if (f == 11) o_color = vec4(c.ggg, c.r);                           // RG8 read as IA8
+  else if (f == 12) o_color = vec4(c.bbb, c.g);                           // GB8 read as IA8
+  else o_color = c;                                                       // RGBA8 / YUVA8
+}
+)";
+#else
 static const char* kCopyVs = R"(#version 330 core
 uniform vec4 u_rect; // x, y, w, h in EFB texture coordinates (0..1)
 out vec2 v_uv;
@@ -360,6 +425,7 @@ void main() {
   else o_color = c;                                                       // RGBA8 / YUVA8
 }
 )";
+#endif
 
 // ------------------------------------------------------------ post-processing
 // The XFB reaches the window through up to two passes: FXAA at the XFB's own
@@ -369,6 +435,71 @@ void main() {
 // XFB is larger than the window, so a high internal resolution supersamples),
 // nearest, or sharp (bilinear only between texels: crisp pixels at any size).
 // SMS_ASPECT=stretch fills the window; integer keeps whole multiples of 640x528.
+#ifdef SMS_GLES
+static const char* kPostVs = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform int u_flip;
+out vec2 v_uv;
+void main() {
+  vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+  v_uv = u_flip != 0 ? vec2(p.x, 1.0 - p.y) : p;
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+static const char* kFxaaFs = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D u_tex;
+uniform vec2 u_rcp;  // 1 / texture size
+in vec2 v_uv;
+layout(location = 0) out vec4 o_color;
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+void main() {
+  vec3 nw = texture(u_tex, v_uv + vec2(-1.0, -1.0) * u_rcp).rgb;
+  vec3 ne = texture(u_tex, v_uv + vec2( 1.0, -1.0) * u_rcp).rgb;
+  vec3 sw = texture(u_tex, v_uv + vec2(-1.0,  1.0) * u_rcp).rgb;
+  vec3 se = texture(u_tex, v_uv + vec2( 1.0,  1.0) * u_rcp).rgb;
+  vec3 m  = texture(u_tex, v_uv).rgb;
+  float lNW = luma(nw), lNE = luma(ne), lSW = luma(sw), lSE = luma(se), lM = luma(m);
+  float lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+  float lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+  vec2 dir = vec2(-((lNW + lNE) - (lSW + lSE)), (lNW + lSW) - (lNE + lSE));
+  float reduce = max((lNW + lNE + lSW + lSE) * (0.25 / 8.0), 1.0 / 128.0);
+  float rcpMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + reduce);
+  dir = clamp(dir * rcpMin, vec2(-8.0), vec2(8.0)) * u_rcp;
+  vec3 a = 0.5 * (texture(u_tex, v_uv + dir * (1.0 / 3.0 - 0.5)).rgb +
+                  texture(u_tex, v_uv + dir * (2.0 / 3.0 - 0.5)).rgb);
+  vec3 b = a * 0.5 + 0.25 * (texture(u_tex, v_uv - dir * 0.5).rgb + texture(u_tex, v_uv + dir * 0.5).rgb);
+  float lB = luma(b);
+  o_color = vec4((lB < lMin || lB > lMax) ? a : b, 1.0);
+}
+)";
+static const char* kScaleFs = R"(#version 300 es
+precision mediump float;
+precision mediump int;
+precision mediump sampler2D;
+uniform sampler2D u_tex;
+uniform vec2 u_src;      // texture size in texels
+uniform vec2 u_dst;      // viewport size in pixels
+uniform int u_filter;    // 0 bilinear/area, 1 nearest, 2 sharp
+uniform float u_sharpen; // 0..1
+uniform float u_gamma;   // 1: unchanged; above 1 brightens
+in vec2 v_uv;
+layout(location = 0) out vec4 o_color;
+void main() {
+  vec3 c;
+  if (u_filter == 1) {
+    c = texelFetch(u_tex, clamp(ivec2(v_uv * u_src), ivec2(0), ivec2(u_src) - 1), 0).rgb;
+  } else {
+    c = texture(u_tex, v_uv).rgb;
+  }
+  if (u_gamma != 1.0) c = pow(max(c, vec3(0.0)), vec3(1.0 / u_gamma));
+  o_color = vec4(c, 1.0);
+}
+)";
+#else
 static const char* kPostVs = R"(#version 330 core
 uniform int u_flip;
 out vec2 v_uv;
@@ -454,6 +585,7 @@ void main() {
   o_color = vec4(c, 1.0);
 }
 )";
+#endif
 
 struct PostSettings {
     bool fxaa = false;
@@ -504,9 +636,11 @@ static void postPresent(GLuint tex, int w, int h, int ox, int oy, int vw, int vh
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+#ifndef SMS_GLES
     glDisable(GL_COLOR_LOGIC_OP);
     glDisable(GL_CLIP_DISTANCE0);
     glDisable(GL_CLIP_DISTANCE0 + 1);
+#endif
     glDisable(GL_SCISSOR_TEST);
     glBindSampler(0, 0);
     glActiveTexture(GL_TEXTURE0);
@@ -550,7 +684,18 @@ static void postPresent(GLuint tex, int w, int h, int ox, int oy, int vw, int vh
 }
 
 void rendererInit(int efbScale) {
-    s_scale = efbScale < 1 ? 1 : efbScale;
+#if defined(__aarch64__) || defined(__arm__)
+    s_scale = 0.75f;
+#else
+    s_scale = efbScale < 1 ? 1.0f : float(efbScale);
+#endif
+    if (const char* e = getenv("SMS_RENDER_SCALE")) {
+        float f = (float)atof(e);
+        if (f >= 0.2f && f <= 8.0f) s_scale = f;
+    } else if (const char* e = getenv("SMS_GX_SCALE")) {
+        float f = (float)atof(e);
+        if (f >= 0.2f && f <= 8.0f) s_scale = f;
+    }
     g_gxStats = g_gxStats || statsEnv();  // settings.txt is read after static initialisation
     const char* renderer = (const char*)glGetString(GL_RENDERER);
     logmsg("OpenGL %s, renderer %s (%s)", (const char*)glGetString(GL_VERSION), renderer,
@@ -563,7 +708,8 @@ void rendererInit(int efbScale) {
     if (const char* e = getenv("SMS_WIDESCREEN_HUD")) s_hudEdges = s_efbW != EFB_W && !strcmp(e, "edges");
     s_ox = (s_efbW - EFB_W) / 2;
     if (s_efbW != EFB_W) logmsg("widescreen: EFB %dx%d", s_efbW, EFB_H);
-    int W = s_efbW * s_scale, H = EFB_H * s_scale;
+    int W = int(float(s_efbW) * s_scale + 0.5f) & ~1, H = int(float(EFB_H) * s_scale + 0.5f) & ~1;
+    logmsg("GX: internal EFB resolution %dx%d (scale %.2f)", W, H, s_scale);
     glGenTextures(1, &s_efbColor);
     glBindTexture(GL_TEXTURE_2D, s_efbColor);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -623,7 +769,11 @@ void rendererInit(int efbScale) {
     glcInvalidate();
     glGenVertexArrays(1, &s_vao);
     glcBindVertexArray(s_vao);
+#if defined(__aarch64__) || defined(__arm__)
+    s_stream.init(32u << 20);
+#else
     s_stream.init(128u << 20);
+#endif
     // Values of the attributes a packed format leaves out (see vaoForFormat):
     // the same defaults the loader used to write into every vertex.
     glVertexAttrib4f(1, 0.0f, 0.0f, 1.0f, 1.0f);  // normal
@@ -740,7 +890,7 @@ void glcForgetTexture(GLuint tex) {
 
 static void applyGlState() {
     GlCache& c = g_glc;
-    int W = s_efbW * s_scale, H = EFB_H * s_scale;
+    int W = int(float(s_efbW) * s_scale + 0.5f), H = int(float(EFB_H) * s_scale + 0.5f);
     if (c.fbo != s_efbFbo) {
         c.fbo = s_efbFbo;
         glBindFramebuffer(GL_FRAMEBUFFER, s_efbFbo);
@@ -770,7 +920,12 @@ static void applyGlState() {
             sw = r - l;
         }
     }
-    GLint sc[4] = {left * s_scale, top * s_scale, sw * s_scale, sh * s_scale};
+    GLint sc[4] = {
+        int(float(left) * s_scale + 0.5f),
+        int(float(top) * s_scale + 0.5f),
+        int(float(sw) * s_scale + 0.5f),
+        int(float(sh) * s_scale + 0.5f)
+    };
     if (memcmp(sc, c.sc, sizeof sc) != 0) {
         memcpy(c.sc, sc, sizeof sc);
         glScissor(sc[0], sc[1], sc[2], sc[3]);
@@ -871,6 +1026,9 @@ static void applyGlState() {
             blendFunc(s, d, dstAlpha ? aSrc : s, dstAlpha ? aDst : d);
         }
     } else if ((cm >> 1) & 1) {
+#ifdef SMS_GLES
+        glcCap(GL_BLEND, c.blend, false);
+#else
         static const GLenum lop[16] = {GL_CLEAR, GL_AND, GL_AND_REVERSE, GL_COPY, GL_AND_INVERTED, GL_NOOP,
                                        GL_XOR, GL_OR, GL_NOR, GL_EQUIV, GL_INVERT, GL_OR_REVERSE,
                                        GL_COPY_INVERTED, GL_OR_INVERTED, GL_NAND, GL_SET};
@@ -881,6 +1039,7 @@ static void applyGlState() {
             c.logicOp = op;
             glLogicOp(op);
         }
+#endif
     } else if (dstAlpha) {
         glcCap(GL_COLOR_LOGIC_OP, c.logic, false);
         glcCap(GL_BLEND, c.blend, true);
@@ -1189,8 +1348,8 @@ uint32_t pixMetricRead() {
     s_pixCur = poolQuery();
     s_pixCurPooled = true;
     glBeginQuery(GL_SAMPLES_PASSED, s_pixCur);
-    uint64_t S2 = uint64_t(s_scale) * uint64_t(s_scale);
-    uint64_t v = samples / S2 + uint64_t(s_pixTris) * 4;
+    float S2 = s_scale > 0.0f ? (s_scale * s_scale) : 1.0f;
+    uint64_t v = uint64_t(float(samples) / S2) + uint64_t(s_pixTris) * 4;
     return v > 0xFFFFFFFFu ? 0xFFFFFFFFu : uint32_t(v);
 }
 
@@ -1396,7 +1555,7 @@ void flushBatch() {
 // is resolved into it first. Leaves the scissor test off.
 static GLuint efbReadFbo() {
     if (!s_msaa) return s_efbFbo;
-    const int W = s_efbW * s_scale, H = EFB_H * s_scale;
+    const int W = int(float(s_efbW) * s_scale + 0.5f), H = int(float(EFB_H) * s_scale + 0.5f);
     glDisable(GL_SCISSOR_TEST);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, s_efbFbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_efbResolveFbo);
@@ -1408,7 +1567,8 @@ static void clearRect(int x, int y, int w, int h) {
     uint32_t ar = g.bp[BP_CLEAR_AR], gb = g.bp[BP_CLEAR_GB], z = g.bp[BP_CLEAR_Z];
     glBindFramebuffer(GL_FRAMEBUFFER, s_efbFbo);
     glEnable(GL_SCISSOR_TEST);
-    glScissor(x * s_scale, y * s_scale, w * s_scale, h * s_scale);
+    glScissor(int(float(x) * s_scale + 0.5f), int(float(y) * s_scale + 0.5f),
+              int(float(w) * s_scale + 0.5f), int(float(h) * s_scale + 0.5f));
     bool hasAlpha = (g.bp[BP_PE_CONTROL] & 7) == 1;
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
@@ -1428,7 +1588,14 @@ static bool copyWriteBackEnabled() {
     static int on = -1;
     if (on < 0) {
         const char* e = getenv("SMS_GX_COPY_WRITEBACK");
-        on = !(e && e[0] == '0');
+        if (e) on = !(e[0] == '0');
+        else {
+#if defined(__aarch64__) || defined(__arm__)
+            on = 0;
+#else
+            on = 1;
+#endif
+        }
     }
     return on != 0;
 }
@@ -1566,7 +1733,6 @@ static void copyEfb(uint32_t ctrl) {
     bool disp = (ctrl >> 14) & 1;
     bool clear = (ctrl >> 11) & 1;
     if (traceFile()) traceCopy(disp, x, y, w, h, dest, ctrl);
-    int S = s_scale;
     // widescreen: a full-width copy takes the whole EFB, others the centred 4:3 part
     int gw = w;
     if (s_efbW != EFB_W) {
@@ -1583,28 +1749,40 @@ static void copyEfb(uint32_t ctrl) {
     }
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
+#ifndef SMS_GLES
     glDisable(GL_COLOR_LOGIC_OP);
+#endif
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+#ifndef SMS_GLES
     glDisable(GL_CLIP_DISTANCE0);
     glDisable(GL_CLIP_DISTANCE0 + 1);
+#endif
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
     if (disp) {
+        int scaledW = int(float(w) * s_scale + 0.5f);
+        int scaledH = int(float(h) * s_scale + 0.5f);
+        int scaledX = int(float(x) * s_scale + 0.5f);
+        int scaledY = int(float(y) * s_scale + 0.5f);
+        int scaledX2 = int(float(x + w) * s_scale + 0.5f);
+        int scaledY2 = int(float(y + h) * s_scale + 0.5f);
+        if (scaledW < 1) scaledW = 1;
+        if (scaledH < 1) scaledH = 1;
         Xfb& xfb = s_xfbs[dest];
-        if (!xfb.tex || xfb.w != w * S || xfb.h != h * S) {
+        if (!xfb.tex || xfb.w != scaledW || xfb.h != scaledH) {
             if (!xfb.tex) glGenTextures(1, &xfb.tex);
             glBindTexture(GL_TEXTURE_2D, xfb.tex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w * S, h * S, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, scaledW, scaledH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            xfb.w = w * S;
-            xfb.h = h * S;
+            xfb.w = scaledW;
+            xfb.h = scaledH;
         }
         glBindFramebuffer(GL_READ_FRAMEBUFFER, efbReadFbo());
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_tmpFbo);
         glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, xfb.tex, 0);
-        glBlitFramebuffer(x * S, y * S, (x + w) * S, (y + h) * S, 0, 0, w * S, h * S, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBlitFramebuffer(scaledX, scaledY, scaledX2, scaledY2, 0, 0, scaledW, scaledH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         s_lastXfb = dest;
         s_stats.efbCopies++;
     } else {
@@ -1612,7 +1790,8 @@ static void copyEfb(uint32_t ctrl) {
         bool intensity = ((ctrl >> 15) & 3) == 3;
         bool zcopy = (g.bp[BP_PE_CONTROL] & 7) == 3;
         bool half = (ctrl >> 9) & 1;
-        int ow = (half ? w / 2 : w) * S, oh = (half ? h / 2 : h) * S;
+        int ow = int(float(half ? w / 2 : w) * s_scale + 0.5f);
+        int oh = int(float(half ? h / 2 : h) * s_scale + 0.5f);
         int tw = half ? gw / 2 : gw, th = half ? h / 2 : h;
         if (ow < 1) ow = 1;
         if (oh < 1) oh = 1;
@@ -1731,11 +1910,11 @@ static uint32_t peekSync(int x, int y, bool depth) {
     glBindFramebuffer(GL_FRAMEBUFFER, efbReadFbo());
     if (depth) {
         glPixelStorei(GL_PACK_ALIGNMENT, 4);
-        glReadPixels(x * s_scale, y * s_scale, 1, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, &v);
+        glReadPixels(int(float(x) * s_scale + 0.5f), int(float(y) * s_scale + 0.5f), 1, 1, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, &v);
         return v;
     }
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(x * s_scale, y * s_scale, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    glReadPixels(int(float(x) * s_scale + 0.5f), int(float(y) * s_scale + 0.5f), 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
     return uint32_t(px[0]) | uint32_t(px[1]) << 8 | uint32_t(px[2]) << 16 | uint32_t(px[3]) << 24;
 }
 
@@ -1744,7 +1923,7 @@ static uint32_t peekSync(int x, int y, bool depth) {
 static GLuint s_peekFbo, s_peekColor, s_peekDepth;
 
 static GLuint peekSource() {
-    if (s_scale == 1) return efbReadFbo();
+    if (s_scale == 1.0f) return efbReadFbo();
     if (!s_peekFbo) {
         glGenRenderbuffers(1, &s_peekColor);
         glBindRenderbuffer(GL_RENDERBUFFER, s_peekColor);
@@ -1762,7 +1941,9 @@ static GLuint peekSource() {
     const GLuint src = efbReadFbo();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, src);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, s_peekFbo);
-    glBlitFramebuffer(0, 0, s_efbW * s_scale, EFB_H * s_scale, 0, 0, s_efbW, EFB_H,
+    const int W = int(float(s_efbW) * s_scale + 0.5f);
+    const int H = int(float(EFB_H) * s_scale + 0.5f);
+    glBlitFramebuffer(0, 0, W, H, 0, 0, s_efbW, EFB_H,
                       GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
     return s_peekFbo;
 }
@@ -1822,13 +2003,31 @@ static uint32_t peekRaw(int x, int y, bool depth) {
     return peekSync(x, y, depth);
 }
 
+static bool fastPeekEnabled() {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("SMS_FAST_PEEK");
+        if (e) on = atoi(e) != 0;
+        else {
+#if defined(__aarch64__) || defined(__arm__)
+            on = 1;
+#else
+            on = 0;
+#endif
+        }
+    }
+    return on != 0;
+}
+
 uint32_t peekColor(int x, int y) {
+    if (fastPeekEnabled()) return 0x10000000;
     uint32_t p = peekRaw(x, y, false);
     uint32_t c = (p >> 24) << 24 | (p & 0xFF) << 16 | ((p >> 8) & 0xFF) << 8 | ((p >> 16) & 0xFF);
     if (FILE* f = traceFile()) fprintf(f, "  GXPeekARGB(%d,%d) = %08X\n", x, y, c);
     return c;
 }
 uint32_t peekZ(int x, int y) {
+    if (fastPeekEnabled()) return 0x00FFFFFF;
     uint32_t v = peekRaw(x, y, true);
     if (FILE* f = traceFile()) fprintf(f, "  GXPeekZ(%d,%d) = %06X\n", x, y, v >> 8);
     return v >> 8;
@@ -1851,7 +2050,7 @@ int GXPC_PresentXFB(const void* xfb, int winW, int winH) {
         if (float(vw) > float(vh) * aspect) vw = int(float(vh) * aspect + 0.5f);
         else vh = int(float(vw) / aspect + 0.5f);
     }
-    const int baseH = x.h / s_scale;  // the picture's height at the GameCube's resolution
+    const int baseH = int(float(x.h) / s_scale + 0.5f);  // the picture's height at the GameCube's resolution
     if (s_post.aspect == 2 && baseH > 0 && vh >= baseH) {
         vh = vh / baseH * baseH;
         vw = int(float(vh) * aspect + 0.5f);
@@ -1879,8 +2078,8 @@ void GXPC_EndPresent(void) {
 void GXPC_ReadEFB(uint8_t* rgba, int* w, int* h) {
     flushBatch();
     glcInvalidate();
-    *w = s_efbW * s_scale;
-    *h = EFB_H * s_scale;
+    *w = int(float(s_efbW) * s_scale + 0.5f);
+    *h = int(float(EFB_H) * s_scale + 0.5f);
     if (!rgba) return;
     glBindFramebuffer(GL_FRAMEBUFFER, efbReadFbo());
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -1981,6 +2180,29 @@ void GXPC_DrawOverlay(const uint8_t* rgba, int w, int h, int x, int y, int scale
     glcInvalidate();
     // glBlitFramebuffer ignores alpha, so draw the panel with source-alpha blending.
     if (!s_overlayProg) {
+#ifdef SMS_GLES
+        static const char* vs = R"(#version 300 es
+precision highp float;
+precision highp int;
+uniform vec4 u_rect;
+uniform vec2 u_window;
+out vec2 v_uv;
+void main() {
+    vec2 p = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+    v_uv = vec2(p.x, 1.0 - p.y);
+    gl_Position = vec4((u_rect.xy + p * u_rect.zw) / u_window * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+        static const char* fs = R"(#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D u_color;
+in vec2 v_uv;
+layout(location = 0) out vec4 o_color;
+void main() { o_color = texture(u_color, v_uv); }
+)";
+#else
         static const char* vs = R"(#version 330 core
 uniform vec4 u_rect;
 uniform vec2 u_window;
@@ -1997,13 +2219,17 @@ in vec2 v_uv;
 out vec4 o_color;
 void main() { o_color = texture(u_color, v_uv); }
 )";
+#endif
         s_overlayProg = compileProgram(vs, fs);
         s_overlayRect = glGetUniformLocation(s_overlayProg, "u_rect");
         s_overlayWindow = glGetUniformLocation(s_overlayProg, "u_window");
     }
     GLint activeUnit = 0, boundTex = 0, rowLength = 0, unpackAlign = 4;
     GLint program = 0, vao = 0, drawFbo = 0, viewport[4], colorMask[4];
-    GLint blend = 0, depth = 0, stencil = 0, cull = 0, scissor = 0, logic = 0, clip0 = 0, clip1 = 0;
+    GLint blend = 0, depth = 0, stencil = 0, cull = 0, scissor = 0;
+#ifndef SMS_GLES
+    GLint logic = 0, clip0 = 0, clip1 = 0;
+#endif
     GLint srcRGB = 0, dstRGB = 0, srcAlpha = 0, dstAlpha = 0, eqRGB = 0, eqAlpha = 0;
     glGetIntegerv(GL_ACTIVE_TEXTURE, &activeUnit);
     glActiveTexture(GL_TEXTURE0);
@@ -2020,9 +2246,11 @@ void main() { o_color = texture(u_color, v_uv); }
     glGetIntegerv(GL_STENCIL_TEST, &stencil);
     glGetIntegerv(GL_CULL_FACE, &cull);
     glGetIntegerv(GL_SCISSOR_TEST, &scissor);
+#ifndef SMS_GLES
     glGetIntegerv(GL_COLOR_LOGIC_OP, &logic);
     glGetIntegerv(GL_CLIP_DISTANCE0, &clip0);
     glGetIntegerv(GL_CLIP_DISTANCE1, &clip1);
+#endif
     glGetIntegerv(GL_BLEND_SRC_RGB, &srcRGB);
     glGetIntegerv(GL_BLEND_DST_RGB, &dstRGB);
     glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcAlpha);
@@ -2040,9 +2268,11 @@ void main() { o_color = texture(u_color, v_uv); }
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_CULL_FACE);
+#ifndef SMS_GLES
     glDisable(GL_COLOR_LOGIC_OP);
     glDisable(GL_CLIP_DISTANCE0);
     glDisable(GL_CLIP_DISTANCE1);
+#endif
     glEnable(GL_BLEND);
     glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
@@ -2073,9 +2303,11 @@ void main() { o_color = texture(u_color, v_uv); }
     if (stencil) glEnable(GL_STENCIL_TEST);
     if (cull) glEnable(GL_CULL_FACE);
     if (scissor) glEnable(GL_SCISSOR_TEST);
+#ifndef SMS_GLES
     if (logic) glEnable(GL_COLOR_LOGIC_OP);
     if (clip0) glEnable(GL_CLIP_DISTANCE0);
     if (clip1) glEnable(GL_CLIP_DISTANCE1);
+#endif
 }
 
 void GXPC_GetStats(GXPCStats* out) {

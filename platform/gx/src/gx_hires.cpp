@@ -585,7 +585,11 @@ void hiresEndFrame() {
     static size_t budget = 0;
     if (!budget) {
         const char* e = getenv("SMS_TEXTURE_PACK_MB");
+#if defined(__aarch64__) || defined(__arm__)
+        budget = size_t(e && atoi(e) > 0 ? atoi(e) : 700) << 20;
+#else
         budget = size_t(e && atoi(e) > 0 ? atoi(e) : 1536) << 20;
+#endif
     }
     if (s_bytes <= budget) return;
     std::vector<std::pair<uint32_t, const std::string*>> old;

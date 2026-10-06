@@ -30,7 +30,9 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g" CACHE STRING "" FORCE)
 # resource structs). Build -m32 when the host has multilib; otherwise fall back
 # to -m64 so compile work can proceed.
 set(SMS_ARCH "auto" CACHE STRING "auto, 32 or 64")
-if(SMS_ARCH STREQUAL "auto")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  set(SMS_ARCH 64)
+elseif(SMS_ARCH STREQUAL "auto")
   include(CheckCXXSourceCompiles)
   set(CMAKE_REQUIRED_FLAGS "-m32")
   set(CMAKE_REQUIRED_LINK_OPTIONS "-m32")
@@ -44,9 +46,17 @@ if(SMS_ARCH STREQUAL "auto")
     message(WARNING "-m32 does not link here (install gcc-multilib g++-multilib); building -m64")
   endif()
 endif()
-add_compile_options(-m${SMS_ARCH})
-add_link_options(-m${SMS_ARCH})
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  add_compile_options(-m${SMS_ARCH})
+  add_link_options(-m${SMS_ARCH})
+endif()
 message(STATUS "SMS port: building -m${SMS_ARCH}")
+
+option(SMS_GLES "Build with OpenGL ES 3.0 backend" OFF)
+if(SMS_GLES)
+  add_compile_definitions(SMS_GLES=1)
+endif()
+
 
 # --- Decomp translation units -----------------------------------------------
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -88,6 +98,8 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i.86)$" OR CMAKE_OSX_ARCHITECT
   # Closer to Gekko single/double results than x87 extended precision
   # (measured on the play5 lockstep trace).
   list(APPEND SMS_GAME_FLAGS -msse2 -mfpmath=sse)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  list(APPEND SMS_GAME_FLAGS -march=armv8-a+simd)
 endif()
 # String literals are Shift-JIS on disc and in the MWCC build (sjiswrap).
 # GCC normally uses -fexec-charset=CP932. Some portable compiler builds lack
@@ -281,7 +293,11 @@ elseif(WIN32)
   set(SMS_OBJCOPY objcopy)
 else()
   set(_object_prefix "")
-  set(SMS_OBJCOPY objcopy)
+  if(CMAKE_OBJCOPY)
+    set(SMS_OBJCOPY ${CMAKE_OBJCOPY})
+  else()
+    find_program(SMS_OBJCOPY NAMES aarch64-linux-gnu-objcopy objcopy)
+  endif()
 endif()
 file(WRITE ${CMAKE_BINARY_DIR}/game_new_syms.txt
   "${_object_prefix}_Znw${_sz} __sms_game_new\n${_object_prefix}_Zna${_sz} __sms_game_new_array\n${_object_prefix}_ZdlPv __sms_game_delete\n${_object_prefix}_ZdaPv __sms_game_delete_array\n")

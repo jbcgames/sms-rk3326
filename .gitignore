@@ -14,3 +14,12 @@
 __pycache__/
 # Release packages (packaging/package.sh).
 /dist/
+
+# Disc images and runtime outputs
+*.iso
+*.ISO
+*.gcm
+*.ciso
+log.txt
+save/
+

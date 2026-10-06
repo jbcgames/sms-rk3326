@@ -39,6 +39,9 @@ void glcForgetTexture(GLuint tex);  // a texture name was deleted
 inline void glcCap(GLenum cap, int& shadow, bool on) {
     if (shadow == int(on)) return;
     shadow = on;
+#ifdef SMS_GLES
+    if (cap == GL_COLOR_LOGIC_OP || cap == GL_CLIP_DISTANCE0 || cap == GL_CLIP_DISTANCE1) return;
+#endif
     if (on) glEnable(cap);
     else glDisable(cap);
 }

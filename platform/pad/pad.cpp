@@ -437,9 +437,29 @@ extern "C" u32 PADRead(PADStatus* status)
 		{ C_DUP, PAD_BUTTON_UP, 11 },      { C_DDOWN, PAD_BUTTON_DOWN, 12 }, { C_DLEFT, PAD_BUTTON_LEFT, 13 },
 		{ C_DRIGHT, PAD_BUTTON_RIGHT, 14 },
 	};
-	for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
-		if (held(map[i].control) || g_cbtn[map[i].cbutton])
-			b |= map[i].bit;
+	static bool s_r1_soft_inited = false;
+	static bool s_r1_soft = true;
+	if (!s_r1_soft_inited) {
+		s_r1_soft_inited = true;
+		if (const char* r = getenv("SMS_R1_SOFT_SPRAY"))
+			s_r1_soft = strcmp(r, "0") != 0;
+	}
+
+	// Exit combo: Back (Select) + Start
+	if (g_cbtn[4] && g_cbtn[6]) {
+		port_log("[pad] Exit combo pressed (Select + Start)\n");
+		exit(0);
+	}
+
+	for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
+		if (map[i].control == C_Z) {
+			if (held(C_Z) || g_cbtn[4] || g_cbtn[9] || (!s_r1_soft && g_cbtn[10]))
+				b |= PAD_TRIGGER_Z;
+		} else {
+			if (held(map[i].control) || g_cbtn[map[i].cbutton])
+				b |= map[i].bit;
+		}
+	}
 	// Triggers: a key is a full press (analog 255 plus the digital click).
 	int tl = g_axis[4] > 0 ? g_axis[4] * 255 / 32767 : 0;
 	int tr = g_axis[5] > 0 ? g_axis[5] * 255 / 32767 : 0;
@@ -447,6 +467,11 @@ extern "C" u32 PADRead(PADStatus* status)
 		tl = 255;
 	if (held(C_R))
 		tr = 255;
+	if (s_r1_soft && g_cbtn[10]) {
+		// Soft R press: spray water while running without locking movement into aim
+		if (tr < 180)
+			tr = 180;
+	}
 	if (tl >= 250)
 		b |= PAD_TRIGGER_L;
 	if (tr >= 250)
